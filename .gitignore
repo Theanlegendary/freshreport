@@ -52,4 +52,6 @@ app.*.map.json
 test_run_all_bench/
 test_run_all_bench_fast/
 cache/
+node_modules/
+.next/
 

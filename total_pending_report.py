@@ -5,11 +5,17 @@ Generates CEO executive summary and audit dataset for all pending shipments
 across all branches, grouped by Branch, Facility Type (P, S, A), and Age (Days).
 Designed with the official CEO Executive Teal Table aesthetic and intuitive color tiers.
 
-SIMPLIFIED - NO GRACE PERIOD LOGIC (like /penalty)
+ALL ACTIVE STATUSES INCLUDED (exclude only: 99, 100, 201=Cancelled | 410=Delivered | 520=Returned to Hub)
+Test orders excluded via keyword/ID filtering.
 
-Approved Statuses (14):  # REMOVED 420 and 472
-- NOT ASSIGN / Branch (3): 306, 309, 400
-- DELIVERY (11): 401, 402, 430, 460, 470, 471, 480, 500, 510, 511, 512
+Approved Statuses (25 — all active, non-completed):
+- Pickup chain    (5): 110, 120, 200, 210, 230
+- Transit chain   (5): 300, 302, 310, 311, 306
+- At Branch       (2): 309, 400
+- Delivery        (5): 401, 402, 420, 430, 402
+- Delivery issue  (3): 460, 470, 471
+- Resolving       (3): 472, 480, 500
+- Return chain    (4): 510, 511, 512, 540
 
 Age Buckets (ACTUAL HOURS - NO GRACE ADJUSTMENTS):
 - 0 Days:   0:00 -> 23:59 (< 24.0 hours)
@@ -20,11 +26,6 @@ Age Buckets (ACTUAL HOURS - NO GRACE ADJUSTMENTS):
 - 5 Days: 120:00 -> 167:59 (>= 120.0 and < 168.0 hours, covers 5 to 7 days)
 - > 7 Days: >= 168.0 and < 720.0 hours (> 7 Days and < 30 Days, limited to this month)
 - Over 30 Days: Excluded (>= 720.0 hours)
-
-NO MORE:
-- No status 420/472 grace period
-- No checking tracking history logs
-- Uses actual aging hours directly (cleaner and faster like /penalty)
 """
 
 import os
@@ -42,10 +43,29 @@ from openpyxl.utils import get_column_letter
 
 import excel_to_image
 
-APPROVED_STATUSES = {
-    '306', '309', '400',
-    '401', '402', '430', '460', '470', '471', '480', '500', '510', '511', '512'
-    # REMOVED: '420', '472' - no longer check these statuses or their history
+# EXCLUDED STATUSES:
+# 1. Done / Cancelled orders (410=Delivered, 520=Returned to Hub, 99/100/201=Cancelled)
+# 2. Transit (Send Mega) — outgoing parcels to Mega Hub, not branch delivery inventory (210, 230, 300, 302, 310, 311)
+# 3. Pickup chain — not yet collected from sender (110, 120, 200)
+# Everything else is active branch inventory (Branch/Not Assign, Delivery, 420 Rescheduled, Returns)
+EXCLUDED_STATUSES = {
+    # Done / Cancelled
+    '99',   # Cancelled / Test
+    '100',  # Cancelled confirmed
+    '201',  # Pickup cancelled
+    '410',  # Delivered Successfully ✅ Done
+    '520',  # Returned to Hub ✅ Done
+    # Transit (Send Mega) — outgoing parcels to Mega Hub
+    '210',  # Picked up / Handover to driver
+    '230',  # In transit to Mega
+    '300',  # Dispatched / Transit
+    '302',  # Completed loading to Hub
+    '310',  # Bagged / Packed to Hub (Đóng kiện)
+    '311',  # Handover to Mega (Nhận tay)
+    # Pickup chain — uncollected orders
+    '110',  # New order / Pickup pending
+    '120',  # Assigned pickup rider
+    '200',  # Picking up
 }
 
 FACILITY_COLS = ['Servicepoint', 'Showroom', 'Agent']
@@ -121,10 +141,13 @@ def process_pending_data(src_path_or_df):
     # Standardize column names
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Extract 3-digit status code
+    # Extract 3-digit status code — same exclusion logic as generate_report.py (push report)
+    # Exclude only: 99/100/201=Cancelled, 410=Delivered, 520=Returned to Hub
+    # Everything else is still pending/active — matches what push report counts
     sc = df['CURRENT STATUS'].astype(str).str.extract(r'^(\d{3})')[0]
-    df_p = df[sc.isin(APPROVED_STATUSES)].copy()
-    df_p['STATUS_CODE'] = sc[sc.isin(APPROVED_STATUSES)]
+    active_mask = sc.notna() & ~sc.isin(EXCLUDED_STATUSES)
+    df_p = df[active_mask].copy()
+    df_p['STATUS_CODE'] = sc[active_mask]
 
     # Exclude test orders & test post offices (e.g. BANCHI_TEST, TEST PH NOM PENH, test orders)
     test_col = next((c for c in df_p.columns if str(c).strip().lower() in ('is test', 'đơn test', 'don test')), None)

@@ -6299,11 +6299,92 @@ def build_master_daily_report_excel(template_path, raw_excel_path, output_path, 
             pass
 
 
+async def forward_daily_report_to_group(
+    context: ContextTypes.DEFAULT_TYPE,
+    target_group_id: int,
+    reports_map: dict = None,
+    report_order: list = None,
+    captions: dict = None,
+    output_xlsx_path: str = None,
+    output_xlsx_name: str = None,
+    caption_excel: str = None,
+    report_text: str = None,
+):
+    """Forward generated daily report artifacts to the specified group chat ID."""
+    if not target_group_id:
+        return
+    sender_bot = get_group_sender_bot(context)
+    if not sender_bot:
+        log.warning("Cannot forward daily report to group %s: sender_bot not available", target_group_id)
+        return
+
+    log.info("Forwarding daily report to group %s...", target_group_id)
+    import io
+
+    # 1. Forward report text summary FIRST so group sees executive figures immediately
+    if report_text:
+        try:
+            for i in range(0, len(report_text), 4000):
+                await safe_api_call(
+                    sender_bot.send_message,
+                    chat_id=target_group_id,
+                    text=report_text[i:i+4000],
+                )
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            log.warning("Failed forwarding daily report text to %s: %s", target_group_id, e)
+
+    # 2. Forward swipeable album of rendered images (if available)
+    if reports_map and report_order:
+        try:
+            from telegram import InputMediaPhoto
+            group_media = []
+            for rep_name in report_order:
+                img_path = reports_map.get(rep_name)
+                if img_path and os.path.exists(img_path):
+                    with open(img_path, "rb") as f:
+                        img_bytes = f.read()
+                        group_media.append(
+                            InputMediaPhoto(
+                                io.BytesIO(img_bytes),
+                                caption=(captions or {}).get(rep_name, "")
+                            )
+                        )
+            if group_media:
+                for chunk_idx in range(0, len(group_media), 10):
+                    chunk = group_media[chunk_idx:chunk_idx+10]
+                    await safe_api_call(sender_bot.send_media_group, chat_id=target_group_id, media=chunk)
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            log.warning("Failed forwarding daily report media album to %s: %s", target_group_id, e)
+
+    # 3. Forward populated Excel file (if available)
+    if output_xlsx_path and os.path.exists(output_xlsx_path):
+        try:
+            with open(output_xlsx_path, "rb") as f:
+                await safe_api_call(
+                    sender_bot.send_document,
+                    chat_id=target_group_id,
+                    document=f,
+                    filename=output_xlsx_name or os.path.basename(output_xlsx_path),
+                    caption=caption_excel or "📊 Master Daily Excel",
+                    read_timeout=180,
+                    write_timeout=180,
+                    connect_timeout=60,
+                )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            log.warning("Failed forwarding daily report Excel document to %s: %s", target_group_id, e)
+
+
 @pm_required_handler
 async def cmd_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/dailyreport [date] — generate text daily report (volume, comparison, zero-order offices/branches), render screenshot image and send populated Master Daily Excel."""
     await delete_group_command(update, context)
     cfg = load_config()
+    target_groups = cfg.get("telegram", {}).get("daily_report_group_id", -5587688944)
+    if not isinstance(target_groups, list):
+        target_groups = [target_groups]
     
     # Parse optional date argument
     args = [a.strip() for a in (context.args or []) if a.strip()]
@@ -6590,6 +6671,7 @@ async def cmd_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Formatting report output
         time_str = datetime.now().strftime("%H:%M") if target_date == today else "23:59"
         date_formatted = target_date.strftime("%d/%m")
+        date_full = target_date.strftime("%d/%m/%Y")
         
         report_text = (
             f"📦 BÁO CÁO SẢN LƯỢNG {date_formatted}-{time_str}\n\n"
@@ -6699,7 +6781,11 @@ async def cmd_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "customer_report": f"👥 Báo cáo khách hàng mới ({date_formatted})",
                     "day_report": f"📅 Branch Day Report ({date_formatted})",
                     "month_report": f"📅 Branch Month Report ({date_formatted})",
-                    "sp_order_express_all": f"📦 [SERVICE POINT] Report of Order Express ({date_formatted})",
+                    "sp_order_express_all": (
+                        f"@everyone សួស្តីបងៗនេះជារបាយការណ៍បញ្ញើ និងរបាយណ៏លទ្ធផលភ្ញៀវថ្មីសម្រាប់ថ្ងៃទី{date_full}\n"
+                        f"ម៉ោង {time_str}\n"
+                        f"អរគុណបង"
+                    ),
                     "sp_customer_development": f"👥 [SERVICE POINT] Customer Development ({date_formatted})",
                     "sp_zone_1": f"📍 Service Point Zone 1 ({date_formatted})",
                     "sp_zone_2": f"📍 Service Point Zone 2 ({date_formatted})",
@@ -6727,13 +6813,52 @@ async def cmd_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         output_xlsx_name,
                         caption=f"📊 Master Daily Excel {date_formatted} {time_str}"
                     )
-                await edit_or_send_requester_text(msg, update, context, report_text)
+                try:
+                    await safe_api_call(msg.delete)
+                except Exception:
+                    pass
+                await send_requester_text(update, context, report_text)
+                
+                # Forward to target registered group(s) (e.g. Chat ID: -5587688944)
+                for gid in target_groups:
+                    try:
+                        await forward_daily_report_to_group(
+                            context=context,
+                            target_group_id=int(gid),
+                            reports_map=reports_map,
+                            report_order=report_order,
+                            captions=captions,
+                            output_xlsx_path=output_xlsx_path,
+                            output_xlsx_name=output_xlsx_name,
+                            caption_excel=f"📊 Master Daily Excel {date_formatted} {time_str}",
+                            report_text=report_text,
+                        )
+                    except Exception as e_fwd:
+                        log.warning(f"Error forwarding daily report to group {gid}: {e_fwd}")
             except Exception as exc:
                 log.exception("Error generating populated master Excel")
                 await edit_or_send_requester_text(msg, update, context, report_text + f"\n\n⚠️ Error generating Excel/Image: {exc}")
+                for gid in target_groups:
+                    try:
+                        await forward_daily_report_to_group(
+                            context=context,
+                            target_group_id=int(gid),
+                            report_text=report_text + f"\n\n⚠️ Error generating Excel/Image: {exc}",
+                        )
+                    except Exception as e_fwd:
+                        log.warning(f"Error forwarding daily report to group {gid}: {e_fwd}")
         else:
             log.warning(f"Template not found at {template_path}")
             await edit_or_send_requester_text(msg, update, context, report_text + "\n\n⚠️ Note: Master Daily Report template was not found, so no Excel file was attached.")
+            for gid in target_groups:
+                try:
+                    await forward_daily_report_to_group(
+                        context=context,
+                        target_group_id=int(gid),
+                        report_text=report_text,
+                    )
+                except Exception as e_fwd:
+                    log.warning(f"Error forwarding daily report to group {gid}: {e_fwd}")
         
     except Exception as e:
         log.exception("Error in /dailyreport")

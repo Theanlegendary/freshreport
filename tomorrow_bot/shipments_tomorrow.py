@@ -1,7 +1,197 @@
 import os
+import json
+import concurrent.futures
+import requests
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from datetime import datetime
+from datetime import datetime, timedelta
+
+_API_VERIFIED_IN_TRANSIT_CACHE = {}
+
+def get_api_config():
+    paths = [
+        'config.json',
+        os.path.join(os.path.dirname(__file__), '..', 'config.json'),
+        os.path.join(os.path.dirname(__file__), 'config.json'),
+        r'c:\Users\DELL\Desktop\daily_push\config.json'
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    if cfg.get('api', {}).get('bearer_token'):
+                        return cfg.get('api')
+            except Exception:
+                pass
+    return {}
+
+def verify_orders_in_transit_from_mega(order_ids, api_cfg=None):
+    """
+    Verifies candidate Status 306 bills against tracking API:
+    1. Must have Status S306
+    2. Must have passed MEGA in the middle
+    3. Latest action must be DV driver (DVC... / DV...) receiving handover from MEGA1
+    4. Latest action must NOT be on a post office (neither origin nor destination)
+    """
+    if not order_ids:
+        return set()
+    
+    if api_cfg is None:
+        api_cfg = get_api_config()
+    
+    token = api_cfg.get('bearer_token') if api_cfg else None
+    
+    # Check cache first
+    needed_oids = [oid for oid in order_ids if oid not in _API_VERIFIED_IN_TRANSIT_CACHE]
+    
+    if token and needed_oids:
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': 'Mozilla/5.0'
+        }
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        def check_one(oid):
+            try:
+                url = 'https://gw-express.metfone.com.kh/tms-tracking/api/v1/order-tracking'
+                r = session.get(url, params={'order_id': oid}, timeout=8)
+                if r.status_code != 200:
+                    return oid, False
+                data = r.json()
+                trips = data.get('trackingTrips', [])
+                if not trips:
+                    return oid, False
+                
+                latest_trip = trips[0]
+                latest_st = str(latest_trip.get('status', ''))
+                latest_pc = str(latest_trip.get('postcode', '') or '').upper()
+                latest_ho = latest_trip.get('handoverInfo') or {}
+                latest_hpc = str(latest_ho.get('handoverPointCreation', {}).get('code', '') or '').upper()
+                
+                # Rule 1: Latest status must be S306
+                if latest_st != 'S306':
+                    return oid, False
+                    
+                # Rule 2: Latest action must be DV driver (DVC... or DV...), NOT a post office, NOT MEGA1 hub
+                is_dv = latest_pc.startswith('DVC') or latest_pc.startswith('DV')
+                if not is_dv or latest_pc == 'MEGA1':
+                    return oid, False
+                    
+                # Rule 3: Must have passed MEGA in the middle and latest handover is from MEGA1
+                from_mega = 'MEGA1' in latest_hpc or 'MEGA' in latest_hpc
+                passed_mega = from_mega
+                if not passed_mega:
+                    for t in trips[1:]:
+                        t_pc = str(t.get('postcode', '') or '').upper()
+                        t_ho = t.get('handoverInfo') or {}
+                        t_hp = str(t_ho.get('handoverPoint', {}).get('code', '') or '').upper()
+                        t_hpc = str(t_ho.get('handoverPointCreation', {}).get('code', '') or '').upper()
+                        if 'MEGA1' in (t_pc, t_hp, t_hpc) or 'MEGA' in (t_pc, t_hp, t_hpc):
+                            passed_mega = True
+                            break
+                            
+                return oid, bool(from_mega and passed_mega)
+            except Exception:
+                return oid, False
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+            futures = [executor.submit(check_one, oid) for oid in needed_oids]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    oid, ok = f.result()
+                    _API_VERIFIED_IN_TRANSIT_CACHE[oid] = ok
+                except Exception:
+                    pass
+
+    return {oid for oid in order_ids if _API_VERIFIED_IN_TRANSIT_CACHE.get(oid, False)}
+
+
+def create_ceo_executive_table(ws, start_row, start_col, title, headers, data_rows, total_row=None):
+    """Create a professional CEO-style table with teal header"""
+    
+    # Define styles matching CEO table design
+    header_fill = PatternFill(start_color="0E7569", end_color="0E7569", fill_type="solid")  # Executive Teal
+    total_fill = PatternFill(start_color="C4F4EB", end_color="C4F4EB", fill_type="solid")   # Mint Teal
+    white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")   # White
+    
+    header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")  # White text
+    data_font = Font(name="Segoe UI", size=10, color="0F172A")               # Black text
+    total_font = Font(name="Segoe UI", size=11, bold=True, color="0F172A")   # Bold black
+    title_font = Font(name="Segoe UI", size=12, bold=True, color="FFFFFF")   # White title
+    
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center") 
+    right_align = Alignment(horizontal="right", vertical="center")
+    
+    border_style = Border(
+        left=Side(style="thin", color="CCCCCC"),
+        right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"),
+        bottom=Side(style="thin", color="CCCCCC")
+    )
+    
+    current_row = start_row
+    num_cols = len(headers)
+    
+    # Title row
+    ws.merge_cells(start_row=current_row, start_column=start_col, 
+                   end_row=current_row, end_column=start_col + num_cols - 1)
+    title_cell = ws.cell(row=current_row, column=start_col, value=title)
+    title_cell.font = title_font
+    title_cell.fill = header_fill
+    title_cell.alignment = center_align
+    title_cell.border = border_style
+    ws.row_dimensions[current_row].height = 25
+    current_row += 1
+    
+    # Header row
+    for col_idx, header in enumerate(headers):
+        cell = ws.cell(row=current_row, column=start_col + col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = border_style
+    ws.row_dimensions[current_row].height = 40
+    current_row += 1
+    
+    # Data rows
+    for row_data in data_rows:
+        for col_idx, value in enumerate(row_data):
+            cell = ws.cell(row=current_row, column=start_col + col_idx, value=value)
+            cell.font = data_font
+            cell.fill = white_fill
+            cell.border = border_style
+            
+            if col_idx <= 1:  # Zone/Branch columns - center
+                cell.alignment = center_align
+            elif isinstance(value, (int, float)):  # Numbers - right align
+                cell.alignment = right_align
+            else:
+                cell.alignment = center_align
+                
+        ws.row_dimensions[current_row].height = 20
+        current_row += 1
+    
+    # Total row
+    if total_row:
+        for col_idx, value in enumerate(total_row):
+            cell = ws.cell(row=current_row, column=start_col + col_idx, value=value)
+            cell.font = total_font
+            cell.fill = total_fill
+            cell.border = border_style
+            
+            if col_idx == 0:
+                cell.alignment = left_align
+            elif isinstance(value, (int, float)):
+                cell.alignment = right_align
+            else:
+                cell.alignment = center_align
+        ws.row_dimensions[current_row].height = 25
+    
+    return current_row + 1
 
 def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
     """
@@ -33,8 +223,29 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
     # Status Code extraction
     df['sc'] = df[col_status].astype(str).str.extract(r'^(\d{3})')[0]
     
-    # Active transit shipments only (Status 306, 309, 302, 310, 311)
-    df_active = df[df['sc'].isin(['306', '309', '302', '310', '311'])].copy()
+    # Pre-filter for incoming transit shipments:
+    # 1. Must be Status 306 ONLY (Status 302/310 at origin store, 309, 311 are excluded)
+    # 2. CURRENT POST OFFICE must be DV driver (starts with DVC or DV, not MEGA1, not a local post office)
+    # 3. Must NOT have reached destination store/agent from hub (STATUS 306 AT STORE / AGENT FROM HUB must be empty)
+    col_current_po = next((c for c in df.columns if 'CURRENT POST OFFICE' in c), 'CURRENT POST OFFICE')
+    df['current_po_clean'] = df[col_current_po].astype(str).str.strip().str.upper()
+    
+    col_store_from_hub = next((c for c in df.columns if 'STATUS 306 AT STORE / AGENT FROM HUB' in c), None)
+    not_at_store_from_hub = df[col_store_from_hub].isna() if col_store_from_hub else True
+    
+    is_dv_driver = (
+        (df['current_po_clean'].isin(['DVCMEGA1', 'DVCMEGA', 'DVMEGA']) | 
+         df['current_po_clean'].str.startswith('DVC') | 
+         df['current_po_clean'].str.startswith('DV')) &
+        (~df['current_po_clean'].isin(['MEGA1']))
+    )
+    
+    # Active transit shipments only: Status 306 + with DV driver + not arrived at destination store
+    df_active = df[
+        (df['sc'] == '306') &
+        is_dv_driver &
+        not_at_store_from_hub
+    ].copy()
     
     # Deduplication: Keep only the LATEST scan row per ORDER ID
     # TMS export has multiple rows per bill showing scan history
@@ -104,6 +315,16 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
         (df_active['parsed_date'] >= cutoff_date)
     ].copy()
 
+    # Live API verification: verify candidate bills passed MEGA in the middle,
+    # latest action is DV driver receiving handover from MEGA1, and NOT on post office
+    candidate_oids = df_active[col_order_id].dropna().astype(str).str.strip().unique().tolist()
+    if candidate_oids:
+        api_cfg = get_api_config()
+        if api_cfg.get('bearer_token'):
+            verified_oids = verify_orders_in_transit_from_mega(candidate_oids, api_cfg)
+            df_active = df_active[df_active[col_order_id].astype(str).str.strip().isin(verified_oids)].copy()
+            print(f"Verified {len(df_active)} / {len(candidate_oids)} in-transit bills from MEGA")
+
     # Zone / Post office filtering
     tgt = target_label.upper().replace(" ", "")
     zone_by_prefix = {
@@ -128,23 +349,10 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
         target_zone_name = tgt if len(tgt) > 4 else "ZONE1"
         df_active['zone'] = df_active['dest_prov_clean'].map(zone_by_prefix).fillna("ZONE1")
         df_matched = df_active[df_active['zone'] == target_zone_name].copy()
-    # For "ALL" or "TOTAL" - show packages at DVCMEGA1 hub ONLY (exclude MEGA1)
-    # Must match /total mega DVMEGA section exactly
+    # For "ALL" or "TOTAL" - show packages in-transit from MEGA with DV driver
     elif tgt in ("ALL", "TOTAL", "MEGA", "BRANCH", "BRANCHES"):
-        col_current_po = next((c for c in df.columns if 'CURRENT POST OFFICE' in c), 'CURRENT POST OFFICE')
-        
-        df_active['current_po_clean'] = df_active[col_current_po].astype(str).str.strip().str.upper()
-        
-        # ONLY DVCMEGA1 hub (EXCLUDE MEGA1) with Status 306
-        # This matches the DVMEGA section in /total mega report
-        df_matched = df_active[
-            (df_active['current_po_clean'].isin(['DVCMEGA1', 'DVCMEGA', 'DVMEGA']) | 
-             df_active['current_po_clean'].str.contains('DVCMEGA|DVMEGA', na=False)) &
-            (~df_active['current_po_clean'].isin(['MEGA1'])) &  # EXCLUDE MEGA1 
-            (df_active['sc'] == '306')  # Only Status 306 at DVCMEGA1
-        ].copy()
-        
-        print(f"DVCMEGA1 only (excluded MEGA1) + Status 306: {len(df_matched)} bills")
+        df_matched = df_active.copy()
+        print(f"DVC driver in-transit from MEGA (passed MEGA + latest action DV driver): {len(df_matched)} bills")
     elif tgt in PROVINCIAL_BRANCH_CODES or (len(tgt) == 3 and tgt in zone_by_prefix and tgt not in ("PNP", "KAN")):
         df_matched = df_active[
             (df_active['dest_prov_clean'] == tgt[:3]) |
@@ -733,7 +941,23 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
     font_banner = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
     font_hdr    = Font(name="Segoe UI", size=9,  bold=True, color="FFFFFF")
     font_data   = Font(name="Segoe UI", size=9,  color="0F172A")
-    font_data    ws1.merge_cells("J1:M1")
+    font_data_b = Font(name="Segoe UI", size=9,  bold=True, color="0F172A")
+    font_tot    = Font(name="Segoe UI", size=10, bold=True, color="0F172A")
+    font_tot_red= Font(name="Segoe UI", size=10, bold=True, color="C00000")
+
+    # Row 1: Title Banners (Height 36)
+    stamp_date = datetime.now().strftime("%d.%m")
+    target_clean = target_label.upper()
+    title_left_txt = f"SHIPMENTS INCOMING REPORT {stamp_date} (Báo cáo hàng đến {target_clean})"
+    title_right_txt= f"EXECUTIVE SUMMARY ({target_clean})"
+
+    ws1.merge_cells("A1:H1")
+    ws1.cell(1, 1, title_left_txt).font = font_banner
+    ws1.cell(1, 1).alignment = Alignment(horizontal="left", vertical="center")
+    for c in range(1, 9):
+        ws1.cell(1, c).fill = fill_title_left
+
+    ws1.merge_cells("J1:M1")
     ws1.cell(1, 10, title_right_txt).font = font_banner
     ws1.cell(1, 10).alignment = Alignment(horizontal="center", vertical="center")
     for c in range(10, 14):
@@ -908,28 +1132,7 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
     tot_w_cell.fill = fill_sum_tot
     tot_w_cell.border = tot_border_accounting
     tot_w_cell.alignment = Alignment(horizontal="right", vertical="center")
-    tot_w_cell.number_format = "#,##0"ish)
-    ws1.row_dimensions[r_sum].height = 25.0
-    ws1.merge_cells(start_row=r_sum, start_column=10, end_row=r_sum, end_column=12)
-    tot_label_str = f"{target_clean} Total ({len(branch_groups)} Branches)" if is_zone_summary else f"{target_clean} Total"
-    tot_label_cell = ws1.cell(r_sum, 10, tot_label_str)
-    tot_label_cell.font = font_tot
-    tot_label_cell.alignment = Alignment(horizontal="left", vertical="center")
-    for c in range(10, 13):
-        cell = ws1.cell(r_sum, c)
-        cell.fill = fill_sum_tot
-        cell.border = tot_border_accounting
-
-    tot_b_cell = ws1.cell(r_sum, 13, total_bills)
-    tot_b_cell.font = font_tot
-    tot_b_cell.fill = fill_sum_tot
-    tot_b_cell.border = tot_border_accounting
-    tot_b_cell.alignment = Alignment(horizontal="right", vertical="center")
-
-    tot_w_cell = ws1.cell(r_sum, 14, total_weight)
-    tot_w_cell.font = font_tot_red
-    tot_w_cell.fill = fill_sum_tot
-    tot_w_cell.border = tot_border_accounting
+    tot_w_cell.number_format = "#,##0"
     tot_w_cell.alignment = Alignment(horizontal="right", vertical="center")
     tot_w_cell.number_format = "#,##0"
 

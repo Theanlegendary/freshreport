@@ -601,6 +601,20 @@ def render_excel_reports(xlsx_path: str, target_date, out_dir: str) -> dict:
     Renders the required report screenshots from the populated Excel file using Excel COM.
     Uses 'Khmer UI' for Khmer text (matching shipment report style) via _apply_khmer_font().
     """
+    try:
+        from exporter import export_5_report_images
+        res = export_5_report_images(xlsx_path, out_dir)
+        return {
+            "day_report": res.get("img1"),
+            "sp_order_express_all": res.get("img2"),
+            "agent_report": res.get("img3"),
+            "showroom_report": res.get("img4"),
+            "customer_report": res.get("img5")
+        }
+    except Exception as e:
+        import logging
+        logging.exception(f"Direct exporter failed, falling back to legacy render: {e}")
+
     import pythoncom
     pythoncom.CoInitialize()
     import win32com.client

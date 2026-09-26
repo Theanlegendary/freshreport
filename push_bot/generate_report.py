@@ -144,7 +144,7 @@ W_DAY   = 7.0   # day columns e.g. "01","02"
 W_ZONE  = 9.0   # ZONE
 W_GT    = 20.0  # Grand Total
 W_MIN   = 8.0
-W_MAX   = 38.0
+W_MAX   = 28.0  # Reduced from 38 to keep images small for Telegram
 
 # Highlight threshold: rows older than this many days get highlighted
 HIGHLIGHT_OVER_DAYS = 1
@@ -611,6 +611,12 @@ def _write_table(ws, start_row, start_col, report_name, rows, index_cols, active
 
         for ci, col_name in enumerate(all_cols):
             val  = row_dict.get(col_name, '')
+            # Truncate long text fields to keep images compact for Telegram
+            if not is_total and isinstance(val, str):
+                if col_name in ('RECEIVER', 'Cus name') and len(val) > 32:
+                    val = val[:32] + '…'
+                elif col_name == 'NEXT_STEP' and len(val) > 28:
+                    val = val[:28] + '…'
             cell = ws.cell(r, start_col + ci, val if val != '' else None)
             cell.border = bdr
             val_str = str(val) if val is not None else ''
@@ -626,11 +632,10 @@ def _write_table(ws, start_row, start_col, report_name, rows, index_cols, active
 
             cell_fill = row_fill
             cell_font = _font(fn, '1E293B', bold=False, text=val_str)
-            # Keep identifiers compact while allowing names, locations, and the
-            # action instruction to remain readable without horizontal scrolling.
+            # Keep identifiers compact — no wrap to keep row heights fixed and images small
             cell_align = _align(
                 'left' if col_name in ('CURRENT POST OFFICE', 'RECEIVER', 'Cus name', 'NEXT_STEP') else 'center',
-                wrap=col_name in ('CURRENT POST OFFICE', 'RECEIVER', 'Cus name', 'NEXT_STEP'),
+                wrap=False,  # Disabled wrap to prevent tall rows and oversized images
                 indent=1 if col_name in ('RECEIVER', 'Cus name') else 0,
             )
 
@@ -642,7 +647,8 @@ def _write_table(ws, start_row, start_col, report_name, rows, index_cols, active
             if is_total:
                 if row_fill:
                     cell.fill = row_fill
-                cell.font = _font(fn, RED if col_name == 'Grand Total' else ('0F172A' if col_name in index_cols else '0F172A'), bold=(col_name == 'Grand Total' or col_name in index_cols), text=val_str)
+                is_first_index = (index_cols and col_name == index_cols[0])
+                cell.font = _font(fn, RED if col_name == 'Grand Total' else '0F172A', bold=(col_name == 'Grand Total' or is_first_index), text=val_str)
             elif col_name == 'Age':
                 match = re.search(r'(\d+)\s*h(?:\s*(\d+)\s*m)?', val_str, re.IGNORECASE)
                 if match:
@@ -750,11 +756,12 @@ def _set_col_widths(ws):
                     pass
             
             if header_val in ('Cus name', 'RECEIVER'):
-                ws.column_dimensions[letter].width = min(max(max_len + 4, 25), 55)
+                # Cap receiver/name column to 35 to prevent oversized images in Telegram push
+                ws.column_dimensions[letter].width = min(max(max_len + 4, 22), 35)
             elif header_val == 'Phone':
-                ws.column_dimensions[letter].width = min(max(max_len + 4, 19), 38)
+                ws.column_dimensions[letter].width = min(max(max_len + 4, 19), 28)
             elif header_val == 'ORDER ID':
-                ws.column_dimensions[letter].width = min(max(max_len + 6, 22), 30)
+                ws.column_dimensions[letter].width = min(max(max_len + 6, 22), 28)
             else:
                 ws.column_dimensions[letter].width = min(max(max_len + 2, W_MIN), W_MAX)
 
@@ -1127,16 +1134,21 @@ def generate_reports_from_data(export_path, ref_path, output_dir,
         df['STATUS_CODE'] = ''
 
     # ========== LIVE API STATUS SYNC (PURGE SHIPPED/DELIVERED BILLS) ==========
+    completed_from_sync = set()
     try:
         from shipped_filter import filter_shipped_bills_from_df
         df, removed_shipped = filter_shipped_bills_from_df(df, verify_live=True)
+        if removed_shipped:
+            completed_from_sync.update(removed_shipped)
     except Exception as e_shipped:
         print(f"[GENERATE_REPORT] Warning: Live shipped verification error: {e_shipped}")
     # ========== END LIVE API STATUS SYNC ==========
 
-    # Scrape all excluded/completed/420 status bills UPFRONT before report generation & comparison
-    excluded_codes = {'99', '100', '201', '410', '420', '520'}
-    excluded_keywords = ['410', '420', '520', 'GIAO THÀNH CÔNG', 'DELIVERED', 'COMPLETED', 'ĐÃ GIAO', 'DA GIAO', 'RETURN COMPLETED', 'FINISH', 'SUCCESS', 'HẸN GIAO LẠI', 'HEN GIAO LAI']
+    # Scrape all excluded/completed status bills UPFRONT before report generation & comparison
+    # Excluded: 99=Cancelled, 100=Cancelled confirmed, 201=Pickup cancelled, 410=Delivered, 520=Returned to Hub
+    # NOTE: 420 (Rescheduled/Customer Appointment) is INCLUDED — still active, needs follow-up
+    excluded_codes = {'99', '100', '201', '410', '520'}
+    excluded_keywords = ['410', '520', 'GIAO THÀNH CÔNG', 'DELIVERED', 'COMPLETED', 'ĐÃ GIAO', 'DA GIAO', 'RETURN COMPLETED', 'FINISH', 'SUCCESS']
     
     if 'STATUS_CODE' in df.columns:
         sc_mask = df['STATUS_CODE'].astype(str).str.strip().isin(excluded_codes)
@@ -1144,8 +1156,8 @@ def generate_reports_from_data(export_path, ref_path, output_dir,
 
     if 'CURRENT STATUS' in df.columns:
         st_text = df['CURRENT STATUS'].astype(str).str.upper()
-        # Check if CURRENT STATUS starts with excluded codes (handles "410 - Delivered", "420 - Hen giao lai")
-        starts_with_excluded = st_text.str.match(r'^(99|100|201|410|420|520)\b')
+        # Check if CURRENT STATUS starts with excluded codes (handles "410 - Delivered", "520 - Return Hub")
+        starts_with_excluded = st_text.str.match(r'^(99|100|201|410|520)\b')
         df = df[~starts_with_excluded].copy()
         for kw in excluded_keywords:
             df = df[~st_text.str.contains(kw.upper(), na=False)].copy()
@@ -1349,10 +1361,10 @@ def generate_reports_from_data(export_path, ref_path, output_dir,
         for sc in r.get("status_codes", []):
             status_map[str(sc).strip()] = label
 
-    # Globally drop completed/done statuses from all reports
+    # Globally drop completed/done statuses from all reports (99=Cancelled, 100=Cancelled, 201=Pickup cancelled, 410=Delivered, 520=Returned to Hub)
     dm_all = dm.copy()  # Keep full data for dashboard (includes completed)
     if 'STATUS_CODE' in dm.columns:
-        dm = dm[~dm['STATUS_CODE'].isin(['99', '100', '410', '201', '520'])].copy()
+        dm = dm[~dm['STATUS_CODE'].isin(['99', '100', '201', '410', '520'])].copy()
 
     # Normalise Fee/COD columns if present
     fee_col_raw = next((c for c in dm.columns if 'TOTAL FEE' in c.upper()), None)
@@ -1407,10 +1419,20 @@ def generate_reports_from_data(export_path, ref_path, output_dir,
             filter_col = REPORT_FILTER_COLS[rn]
             if filter_col in df_t.columns:
                 df_t = df_t[df_t[filter_col].isin(target_handles)]
-        # Exclude MEGA/HUB/DVC from Transit/Branch (these show in /total mega instead)
+        # Exclude bills physically still at MEGA/HUB/DVC hubs from Branch and Transit tabs.
+        # These bills are still in transit and belong to /total mega, NOT to branch reports.
+        # We check CURRENT POST OFFICE (where the bill is NOW) — not the destination.
         if rn in ('Transit', 'Branch') and 'CURRENT POST OFFICE' in df_t.columns:
-            mega_mask = df_t['CURRENT POST OFFICE'].str.contains('MEGA|HUB|DVC', case=False, na=False)
+            hub_pattern = r'MEGA|HUB|DVC'
+            mega_mask = df_t['CURRENT POST OFFICE'].str.contains(hub_pattern, case=False, na=False)
             df_t = df_t[~mega_mask].copy()
+            # Also exclude if current PO is blank but POST OFFICE HANDLE is a hub (edge case)
+            if 'POST OFFICE HANDLE' in df_t.columns:
+                handle_hub_mask = (
+                    (df_t['CURRENT POST OFFICE'].str.strip() == '') &
+                    df_t['POST OFFICE HANDLE'].str.contains(hub_pattern, case=False, na=False)
+                )
+                df_t = df_t[~handle_hub_mask].copy()
         # Add NEXT_STEP and KPI columns
         if rn == 'Delivery' and 'STATUS_CODE' in df_t.columns:
             def _delivery_next_step(row):

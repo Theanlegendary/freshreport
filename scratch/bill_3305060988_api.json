@@ -1,0 +1,154 @@
+{
+  "uri": "",
+  "numberOfRetries": 0,
+  "orderNo": "",
+  "trackingTrips": [
+    {
+      "numberOfRetries": 0,
+      "orderId": "3305060988",
+      "updatedBy": {
+        "name": "Soung Sokhachea",
+        "phone": "0975557053"
+      },
+      "updatedAt": "2026-09-19T20:50:54.220+07:00",
+      "cancelReason": "OTHER",
+      "deliveryPostcode": "PNPP002",
+      "postcode": "PNPP008",
+      "provinceName": "",
+      "postOffice": {
+        "postcode": "PNPP008",
+        "name": "PNPP008 - Pou Saen Chey 01",
+        "phone": "0977872172"
+      },
+      "status": "S302",
+      "statusName": "TRANSITING",
+      "actorType": "SYSTEM",
+      "itemType": "TRANSITING_ASSIGN_ORDER",
+      "desc": "Complete the sack PKG_538946_PNPP008",
+      "sort": {
+        "lsn": 1789825854223
+      },
+      "packageTransiting": {
+        "code": "PKG_538946_PNPP008"
+      }
+    },
+    {
+      "numberOfRetries": 0,
+      "orderId": "3305060988",
+      "updatedBy": {
+        "name": "Soung Sokhachea",
+        "phone": "0975557053"
+      },
+      "updatedAt": "2026-09-19T20:50:47.500+07:00",
+      "cancelReason": "OTHER",
+      "deliveryPostcode": "PNPP002",
+      "postcode": "PNPP008",
+      "provinceName": "",
+      "postOffice": {
+        "postcode": "PNPP008",
+        "name": "PNPP008 - Pou Saen Chey 01",
+        "phone": "0977872172"
+      },
+      "status": "S300",
+      "statusName": "TRANSITING",
+      "actorType": "SYSTEM",
+      "itemType": "TRANSITING",
+      "desc": "Put the order in the sack PKG_538946_PNPP008 with note .",
+      "sort": {
+        "lsn": 1789825847503
+      },
+      "packageTransiting": {
+        "code": "PKG_538946_PNPP008",
+        "note": ""
+      }
+    },
+    {
+      "numberOfRetries": 0,
+      "orderId": "3305060988",
+      "updatedBy": {
+        "name": "Soung Sokhachea",
+        "phone": "0975557053",
+        "id": "1101"
+      },
+      "updatedAt": "2026-09-19T20:49:30.477+07:00",
+      "service": "CCN",
+      "vas": [
+        "NTN"
+      ],
+      "weight": 1000.0,
+      "cod": 0.0,
+      "cancelReason": "OTHER",
+      "deliveryPostcode": "SPEP001",
+      "postcode": "PNPP008",
+      "provinceName": "",
+      "totalFees": 0.87,
+      "postmanPickup": {
+        "name": "Soung Sokhachea",
+        "phone": "0975557053",
+        "id": "1101"
+      },
+      "status": "S210",
+      "statusName": "RECEIVED",
+      "actorType": "CUSTOMER",
+      "itemType": "RECEIVED",
+      "desc": "Received the order (Service: CCN; extra service: [NTN] ; Weight: 1,000 g; COD: 0.00 USD)",
+      "sort": {
+        "version": 3,
+        "lsn": 1789825770484
+      }
+    },
+    {
+      "numberOfRetries": 0,
+      "orderId": "3305060988",
+      "updatedBy": {
+        "name": "System"
+      },
+      "updatedAt": "2026-09-19T20:48:28.278+07:00",
+      "cancelReason": "OTHER",
+      "deliveryPostcode": "PNPP008",
+      "postcode": "PNPP008",
+      "provinceName": "",
+      "postOffice": {
+        "postcode": "PNPP008",
+        "name": "PNPP008 - Pou Saen Chey 01",
+        "phone": "0977872172"
+      },
+      "status": "S120",
+      "statusName": "WAITING_TO_RECEIVE",
+      "actorType": "CUSTOMER",
+      "itemType": "WAITING_TO_RECEIVE",
+      "desc": "Orginal post office is assigned.",
+      "sort": {
+        "version": 1,
+        "lsn": 1789825708284
+      }
+    },
+    {
+      "numberOfRetries": 0,
+      "orderId": "3305060988",
+      "updatedBy": {
+        "name": "Kimhuy",
+        "phone": "+85560628072",
+        "id": "5a29972c-2e9b-4d63-bf18-a545d0dced04"
+      },
+      "updatedAt": "2026-09-19T20:48:28.104+07:00",
+      "service": "CCN",
+      "vas": [
+        "NTN"
+      ],
+      "weight": 1000.0,
+      "cod": 0.0,
+      "cancelReason": "OTHER",
+      "provinceName": "",
+      "status": "S110",
+      "statusName": "CONFIRMED",
+      "actorType": "CUSTOMER",
+      "itemType": "CREATE_ORDER",
+      "desc": "Order is placed (Service: CCN; extra service: [NTN] ; Weight: 1,000 g; COD: 0.00 USD)",
+      "sort": {
+        "version": 0
+      },
+      "shipperName": "Home"
+    }
+  ]
+}

@@ -1,8 +1,113 @@
 import os
+import json
+import concurrent.futures
+import requests
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from datetime import datetime, timedelta
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+_API_VERIFIED_IN_TRANSIT_CACHE = {}
+
+def get_api_config():
+    paths = [
+        'config.json',
+        os.path.join(os.path.dirname(__file__), '..', 'config.json'),
+        os.path.join(os.path.dirname(__file__), 'config.json'),
+        r'c:\Users\DELL\Desktop\daily_push\config.json'
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    if cfg.get('api', {}).get('bearer_token'):
+                        return cfg.get('api')
+            except Exception:
+                pass
+    return {}
+
+def verify_orders_in_transit_from_mega(order_ids, api_cfg=None):
+    """
+    Verifies candidate Status 306 bills against tracking API:
+    1. Must have Status S306
+    2. Must have passed MEGA in the middle
+    3. Latest action must be DV driver (DVC... / DV...) receiving handover from MEGA1
+    4. Latest action must NOT be on a post office (neither origin nor destination)
+    """
+    if not order_ids:
+        return set()
+    
+    if api_cfg is None:
+        api_cfg = get_api_config()
+    
+    token = api_cfg.get('bearer_token') if api_cfg else None
+    
+    # Check cache first
+    needed_oids = [oid for oid in order_ids if oid not in _API_VERIFIED_IN_TRANSIT_CACHE]
+    
+    if token and needed_oids:
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': 'Mozilla/5.0'
+        }
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        def check_one(oid):
+            try:
+                url = 'https://gw-express.metfone.com.kh/tms-tracking/api/v1/order-tracking'
+                r = session.get(url, params={'order_id': oid}, timeout=8)
+                if r.status_code != 200:
+                    return oid, False
+                data = r.json()
+                trips = data.get('trackingTrips', [])
+                if not trips:
+                    return oid, False
+                
+                latest_trip = trips[0]
+                latest_st = str(latest_trip.get('status', ''))
+                latest_pc = str(latest_trip.get('postcode', '') or '').upper()
+                latest_ho = latest_trip.get('handoverInfo') or {}
+                latest_hpc = str(latest_ho.get('handoverPointCreation', {}).get('code', '') or '').upper()
+                
+                # Rule 1: Latest status must be S306
+                if latest_st != 'S306':
+                    return oid, False
+                    
+                # Rule 2: Latest action must be DV driver (DVC... or DV...), NOT a post office, NOT MEGA1 hub
+                is_dv = latest_pc.startswith('DVC') or latest_pc.startswith('DV')
+                if not is_dv or latest_pc == 'MEGA1':
+                    return oid, False
+                    
+                # Rule 3: Must have passed MEGA in the middle and latest handover is from MEGA1
+                from_mega = 'MEGA1' in latest_hpc or 'MEGA' in latest_hpc
+                passed_mega = from_mega
+                if not passed_mega:
+                    for t in trips[1:]:
+                        t_pc = str(t.get('postcode', '') or '').upper()
+                        t_ho = t.get('handoverInfo') or {}
+                        t_hp = str(t_ho.get('handoverPoint', {}).get('code', '') or '').upper()
+                        t_hpc = str(t_ho.get('handoverPointCreation', {}).get('code', '') or '').upper()
+                        if 'MEGA1' in (t_pc, t_hp, t_hpc) or 'MEGA' in (t_pc, t_hp, t_hpc):
+                            passed_mega = True
+                            break
+                            
+                return oid, bool(from_mega and passed_mega)
+            except Exception:
+                return oid, False
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+            futures = [executor.submit(check_one, oid) for oid in needed_oids]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    oid, ok = f.result()
+                    _API_VERIFIED_IN_TRANSIT_CACHE[oid] = ok
+                except Exception:
+                    pass
+
+    return {oid for oid in order_ids if _API_VERIFIED_IN_TRANSIT_CACHE.get(oid, False)}
+
 
 def create_ceo_executive_table(ws, start_row, start_col, title, headers, data_rows, total_row=None):
     """Create a professional CEO-style table with teal header"""
@@ -118,8 +223,29 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
     # Status Code extraction
     df['sc'] = df[col_status].astype(str).str.extract(r'^(\d{3})')[0]
     
-    # Active transit shipments only (Status 306, 309, 302, 310, 311)
-    df_active = df[df['sc'].isin(['306', '309', '302', '310', '311'])].copy()
+    # Pre-filter for incoming transit shipments:
+    # 1. Must be Status 306 ONLY (Status 302/310 at origin store, 309, 311 are excluded)
+    # 2. CURRENT POST OFFICE must be DV driver (starts with DVC or DV, not MEGA1, not a local post office)
+    # 3. Must NOT have reached destination store/agent from hub (STATUS 306 AT STORE / AGENT FROM HUB must be empty)
+    col_current_po = next((c for c in df.columns if 'CURRENT POST OFFICE' in c), 'CURRENT POST OFFICE')
+    df['current_po_clean'] = df[col_current_po].astype(str).str.strip().str.upper()
+    
+    col_store_from_hub = next((c for c in df.columns if 'STATUS 306 AT STORE / AGENT FROM HUB' in c), None)
+    not_at_store_from_hub = df[col_store_from_hub].isna() if col_store_from_hub else True
+    
+    is_dv_driver = (
+        (df['current_po_clean'].isin(['DVCMEGA1', 'DVCMEGA', 'DVMEGA']) | 
+         df['current_po_clean'].str.startswith('DVC') | 
+         df['current_po_clean'].str.startswith('DV')) &
+        (~df['current_po_clean'].isin(['MEGA1']))
+    )
+    
+    # Active transit shipments only: Status 306 + with DV driver + not arrived at destination store
+    df_active = df[
+        (df['sc'] == '306') &
+        is_dv_driver &
+        not_at_store_from_hub
+    ].copy()
     
     # Deduplication: Keep only the LATEST scan row per ORDER ID
     # TMS export has multiple rows per bill showing scan history
@@ -189,6 +315,16 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
         (df_active['parsed_date'] >= cutoff_date)
     ].copy()
 
+    # Live API verification: verify candidate bills passed MEGA in the middle,
+    # latest action is DV driver receiving handover from MEGA1, and NOT on post office
+    candidate_oids = df_active[col_order_id].dropna().astype(str).str.strip().unique().tolist()
+    if candidate_oids:
+        api_cfg = get_api_config()
+        if api_cfg.get('bearer_token'):
+            verified_oids = verify_orders_in_transit_from_mega(candidate_oids, api_cfg)
+            df_active = df_active[df_active[col_order_id].astype(str).str.strip().isin(verified_oids)].copy()
+            print(f"Verified {len(df_active)} / {len(candidate_oids)} in-transit bills from MEGA")
+
     # Zone / Post office filtering
     tgt = target_label.upper().replace(" ", "")
     zone_by_prefix = {
@@ -213,23 +349,10 @@ def build_shipments_tomorrow_report(src_xlsx, out_xlsx, target_label="Zone 1"):
         target_zone_name = tgt if len(tgt) > 4 else "ZONE1"
         df_active['zone'] = df_active['dest_prov_clean'].map(zone_by_prefix).fillna("ZONE1")
         df_matched = df_active[df_active['zone'] == target_zone_name].copy()
-    # For "ALL" or "TOTAL" - show packages at DVCMEGA1 hub ONLY (exclude MEGA1)
-    # Must match /total mega DVMEGA section exactly
+    # For "ALL" or "TOTAL" - show packages in-transit from MEGA with DV driver
     elif tgt in ("ALL", "TOTAL", "MEGA", "BRANCH", "BRANCHES"):
-        col_current_po = next((c for c in df.columns if 'CURRENT POST OFFICE' in c), 'CURRENT POST OFFICE')
-        
-        df_active['current_po_clean'] = df_active[col_current_po].astype(str).str.strip().str.upper()
-        
-        # ONLY DVCMEGA1 hub (EXCLUDE MEGA1) with Status 306
-        # This matches the DVMEGA section in /total mega report
-        df_matched = df_active[
-            (df_active['current_po_clean'].isin(['DVCMEGA1', 'DVCMEGA', 'DVMEGA']) | 
-             df_active['current_po_clean'].str.contains('DVCMEGA|DVMEGA', na=False)) &
-            (~df_active['current_po_clean'].isin(['MEGA1'])) &  # EXCLUDE MEGA1 
-            (df_active['sc'] == '306')  # Only Status 306 at DVCMEGA1
-        ].copy()
-        
-        print(f"DVCMEGA1 only (excluded MEGA1) + Status 306: {len(df_matched)} bills")
+        df_matched = df_active.copy()
+        print(f"DVC driver in-transit from MEGA (passed MEGA + latest action DV driver): {len(df_matched)} bills")
     elif tgt in PROVINCIAL_BRANCH_CODES or (len(tgt) == 3 and tgt in zone_by_prefix and tgt not in ("PNP", "KAN")):
         df_matched = df_active[
             (df_active['dest_prov_clean'] == tgt[:3]) |

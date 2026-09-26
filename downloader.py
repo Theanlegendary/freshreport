@@ -4,6 +4,9 @@ Goi API export-detail (giong lenh curl) de tai file Excel chi tiet don.
 """
 
 import json
+import os
+import shutil
+import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -494,6 +497,58 @@ def download_all_post_offices(api_cfg, limit=500):
         offset += limit
 
     return all_items
+
+
+def download_new_customers(api_cfg: dict, out_path: str, month: str = None,
+                           cache_minutes: int = 30, force_refresh: bool = False) -> str:
+    """
+    Downloads the new customers report spreadsheet from the API:
+    GET https://gw-express.metfone.com.kh/tms-report/api/v1/new-customers/export?month=YYYY-MM
+    """
+    if month is None:
+        month = datetime.now().strftime("%Y-%m")
+        
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+    cache_file = os.path.join(cache_dir, f"new_customers_{month}.xlsx")
+
+    if cache_minutes > 0 and not force_refresh and os.path.exists(cache_file):
+        mtime = os.path.getmtime(cache_file)
+        age_seconds = time.time() - mtime
+        if age_seconds < (cache_minutes * 60):
+            print(f"[CACHE] Using cached new customers data ({int(age_seconds)}s old)")
+            shutil.copy2(cache_file, out_path)
+            return out_path
+
+    base_url = api_cfg.get("url", "").split("/tms-report/")[0] or "https://gw-express.metfone.com.kh"
+    url = f"{base_url}/tms-report/api/v1/new-customers/export"
+
+    headers = {
+        "Authorization": f"Bearer {api_cfg['bearer_token']}",
+        "Referer": api_cfg.get("referer", "https://opsexpress.metfone.com.kh/"),
+        "Accept": "*/*",
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/148.0.0.0 Safari/537.36"),
+    }
+
+    params = {"month": month}
+
+    resp = requests.get(url, headers=headers, params=params, timeout=120)
+    resp.raise_for_status()
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
+
+    if cache_minutes > 0:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            shutil.copy2(out_path, cache_file)
+            print("[CACHE] Saved new customers data to cache")
+        except Exception as e:
+            print(f"[CACHE] Warning: Failed to save to cache: {e}")
+
+    return out_path
 
 
 if __name__ == "__main__":

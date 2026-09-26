@@ -5,11 +5,19 @@ Generates CEO executive summary and audit dataset for all pending shipments
 across all branches, grouped by Branch, Facility Type (P, S, A), and Age (Days).
 Designed with the official CEO Executive Teal Table aesthetic and intuitive color tiers.
 
-Approved Statuses (16):
-- NOT ASSIGN / Branch (3): 306, 309, 400
-- DELIVERY (13): 401, 402, 420, 430, 460, 470, 471, 472, 480, 500, 510, 511, 512
+ALL ACTIVE STATUSES INCLUDED (exclude only: 99, 100, 201=Cancelled | 410=Delivered | 520=Returned to Hub)
+Test orders excluded via keyword/ID filtering.
 
-Age Buckets:
+Approved Statuses (25 — all active, non-completed):
+- Pickup chain    (5): 110, 120, 200, 210, 230
+- Transit chain   (5): 300, 302, 310, 311, 306
+- At Branch       (2): 309, 400
+- Delivery        (5): 401, 402, 420, 430, 402
+- Delivery issue  (3): 460, 470, 471
+- Resolving       (3): 472, 480, 500
+- Return chain    (4): 510, 511, 512, 540
+
+Age Buckets (ACTUAL HOURS - NO GRACE ADJUSTMENTS):
 - 0 Days:   0:00 -> 23:59 (< 24.0 hours)
 - 1 Day:   24:00 -> 47:59 (>= 24.0 and < 48.0 hours)
 - 2 Days:  48:00 -> 71:59 (>= 48.0 and < 72.0 hours)
@@ -18,10 +26,6 @@ Age Buckets:
 - 5 Days: 120:00 -> 167:59 (>= 120.0 and < 168.0 hours, covers 5 to 7 days)
 - > 7 Days: >= 168.0 and < 720.0 hours (> 7 Days and < 30 Days, limited to this month)
 - Over 30 Days: Excluded (>= 720.0 hours)
-
-Special Aging Rules:
-- Status 420: +1 Day allowance / grace period (-24 hours off aging, e.g. 2 days counts as 1 day)
-- Status 472: +2 Days allowance / grace period (-48 hours off aging, e.g. 3 days counts as 1 day)
 """
 
 import os
@@ -39,9 +43,29 @@ from openpyxl.utils import get_column_letter
 
 import excel_to_image
 
-APPROVED_STATUSES = {
-    '306', '309', '400',
-    '401', '402', '420', '430', '460', '470', '471', '472', '480', '500', '510', '511', '512'
+# EXCLUDED STATUSES:
+# 1. Done / Cancelled orders (410=Delivered, 520=Returned to Hub, 99/100/201=Cancelled)
+# 2. Transit (Send Mega) — outgoing parcels to Mega Hub, not branch delivery inventory (210, 230, 300, 302, 310, 311)
+# 3. Pickup chain — not yet collected from sender (110, 120, 200)
+# Everything else is active branch inventory (Branch/Not Assign, Delivery, 420 Rescheduled, Returns)
+EXCLUDED_STATUSES = {
+    # Done / Cancelled
+    '99',   # Cancelled / Test
+    '100',  # Cancelled confirmed
+    '201',  # Pickup cancelled
+    '410',  # Delivered Successfully ✅ Done
+    '520',  # Returned to Hub ✅ Done
+    # Transit (Send Mega) — outgoing parcels to Mega Hub
+    '210',  # Picked up / Handover to driver
+    '230',  # In transit to Mega
+    '300',  # Dispatched / Transit
+    '302',  # Completed loading to Hub
+    '310',  # Bagged / Packed to Hub (Đóng kiện)
+    '311',  # Handover to Mega (Nhận tay)
+    # Pickup chain — uncollected orders
+    '110',  # New order / Pickup pending
+    '120',  # Assigned pickup rider
+    '200',  # Picking up
 }
 
 FACILITY_COLS = ['Servicepoint', 'Showroom', 'Agent']
@@ -87,62 +111,17 @@ def get_facility_type(po_code: str) -> str:
             return 'Servicepoint'
     return 'Servicepoint'
 
+# REMOVED - No longer needed (no grace period logic)
+# def fetch_pending_history_allowances(order_ids: list[str], bearer_token: str = None) -> dict[str, dict[str, bool]]:
 
-def fetch_pending_history_allowances(order_ids: list[str], bearer_token: str = None) -> dict[str, dict[str, bool]]:
-    """
-    Check real-time tracking trips for candidate pending bills (>= 24h old).
-    Returns a mapping of order_id -> {'has_420': bool, 'has_472': bool}
-    indicating whether status 420 or 472 appeared anywhere in the tracking history log.
-    """
-    if not order_ids:
-        return {}
-
-    if not bearer_token:
-        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                    bearer_token = cfg.get("api", {}).get("bearer_token")
-            except Exception:
-                pass
-
-    if not bearer_token:
-        return {}
-
-    headers = {
-        "Authorization": f"Bearer {bearer_token}",
-        "x-client-id": "TMS_ANDROID",
-        "User-Agent": "Mozilla/5.0"
-    }
-    session = requests.Session()
-    session.headers.update(headers)
-
-    def _check_one(oid: str):
-        try:
-            r = session.get(
-                "https://gw-express.metfone.com.kh/tms-tracking/api/v1/order-tracking",
-                params={"order_id": oid},
-                timeout=5
-            )
-            if r.status_code == 200:
-                trips = r.json().get("trackingTrips", [])
-                hist = {str(t.get("status", "")).lstrip("S").strip() for t in trips}
-                has_420 = "420" in hist
-                has_472 = "472" in hist
-                if has_420 or has_472:
-                    return oid, has_420, has_472
-        except Exception:
-            pass
-        return oid, False, False
-
-    history_map = {}
-    with ThreadPoolExecutor(max_workers=50) as ex:
-        for oid, has_420, has_472 in ex.map(_check_one, order_ids):
-            if has_420 or has_472:
-                history_map[oid] = {"has_420": has_420, "has_472": has_472}
-
-    return history_map
+# REMOVED - No longer needed (no grace period logic)
+# def fetch_pending_history_allowances(order_ids: list[str], bearer_token: str = None) -> dict[str, dict[str, bool]]:
+#     """
+#     Check real-time tracking trips for candidate pending bills (>= 24h old).
+#     Returns a mapping of order_id -> {'has_420': bool, 'has_472': bool}
+#     indicating whether status 420 or 472 appeared anywhere in the tracking history log.
+#     """
+#     [FUNCTION REMOVED - No longer checking history for 420/472]
 
 
 def process_pending_data(src_path_or_df):
@@ -162,10 +141,13 @@ def process_pending_data(src_path_or_df):
     # Standardize column names
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Extract 3-digit status code
+    # Extract 3-digit status code — same exclusion logic as generate_report.py (push report)
+    # Exclude only: 99/100/201=Cancelled, 410=Delivered, 520=Returned to Hub
+    # Everything else is still pending/active — matches what push report counts
     sc = df['CURRENT STATUS'].astype(str).str.extract(r'^(\d{3})')[0]
-    df_p = df[sc.isin(APPROVED_STATUSES)].copy()
-    df_p['STATUS_CODE'] = sc[sc.isin(APPROVED_STATUSES)]
+    active_mask = sc.notna() & ~sc.isin(EXCLUDED_STATUSES)
+    df_p = df[active_mask].copy()
+    df_p['STATUS_CODE'] = sc[active_mask]
 
     # Exclude test orders & test post offices (e.g. BANCHI_TEST, TEST PH NOM PENH, test orders)
     test_col = next((c for c in df_p.columns if str(c).strip().lower() in ('is test', 'đơn test', 'don test')), None)
@@ -237,34 +219,14 @@ def process_pending_data(src_path_or_df):
     df_branch['History_Timestamp'] = ts_df[0]
     df_branch['Actual_Hours'] = ts_df[1]
 
-    # Check tracking history log for bills >= 24h
-    cand_orders = df_branch[df_branch['Actual_Hours'] >= 24.0]['ORDER ID'].dropna().astype(str).unique().tolist()
-    history_map = fetch_pending_history_allowances(cand_orders)
-
+    # NO MORE GRACE PERIOD OR HISTORY CHECKING - SIMPLIFIED LIKE /PENALTY
     def _calc_aging_bucket(row):
         actual_hours = row['Actual_Hours']
-        sc_val = str(row.get('STATUS_CODE', '')).strip()
-        oid = str(row.get('ORDER ID', '')).strip()
-        h_info = history_map.get(oid, {})
+        
+        # NO GRACE ADJUSTMENTS - USE ACTUAL HOURS DIRECTLY
+        adjusted_hours = actual_hours
 
-        has_420 = (sc_val == '420') or h_info.get('has_420', False)
-        has_472 = (sc_val == '472') or h_info.get('has_472', False)
-
-        grace = 0.0
-        grace_note = ''
-        if has_472 and has_420:
-            grace = 48.0
-            grace_note = '+2D Grace (472/420 History)'
-        elif has_472:
-            grace = 48.0
-            grace_note = '+2D Grace (472)' if sc_val == '472' else '+2D Grace (472 in History)'
-        elif has_420:
-            grace = 24.0
-            grace_note = '+1D Grace (420)' if sc_val == '420' else '+1D Grace (420 in History)'
-
-        adjusted_hours = max(0.0, actual_hours - grace)
-
-        # Bucket classification:
+        # Bucket classification based on ACTUAL hours (no grace deductions)
         if adjusted_hours >= 720.0:
             bucket = 'EXCLUDED_OVER_30'
         elif adjusted_hours < 24.0:
@@ -282,12 +244,12 @@ def process_pending_data(src_path_or_df):
         else:
             bucket = '> 7 Days'
 
-        return pd.Series([round(adjusted_hours, 1), bucket, grace_note])
+        return pd.Series([round(adjusted_hours, 1), bucket])  # Only return hours and bucket
 
     aging_df = df_branch.apply(_calc_aging_bucket, axis=1)
     df_branch['Adjusted_Hours'] = aging_df[0]
     df_branch['Age_Bucket'] = aging_df[1]
-    df_branch['Grace_Note'] = aging_df[2]
+    # REMOVED: Grace_Note column completely - no longer needed
 
     # Exclude orders >= 30 days (older than 30 days / not in this month)
     df_branch = df_branch[df_branch['Age_Bucket'] != 'EXCLUDED_OVER_30'].copy()
@@ -495,7 +457,7 @@ def export_total_pending_excel(summary_df, grand_total, df_detail, out_xlsx_path
         ('Actual Hours', 14),
         ('Adjusted Hours', 15),
         ('Age Bucket', 14),
-        ('Grace Note', 22),
+        # REMOVED: ('Grace Note', 22) - No longer needed (no grace logic)
         ('Sender', 25),
         ('Receiver', 25),
         ('Phone', 16),
@@ -526,11 +488,11 @@ def export_total_pending_excel(summary_df, grand_total, df_detail, out_xlsx_path
         ws_det.cell(row=det_row, column=9, value=item.get('Actual_Hours', 0.0)).alignment = Alignment(horizontal='right')
         ws_det.cell(row=det_row, column=10, value=item.get('Adjusted_Hours', 0.0)).alignment = Alignment(horizontal='right')
         ws_det.cell(row=det_row, column=11, value=str(item.get('Age_Bucket', ''))).alignment = Alignment(horizontal='center')
-        ws_det.cell(row=det_row, column=12, value=str(item.get('Grace_Note', ''))).alignment = Alignment(horizontal='center')
-        ws_det.cell(row=det_row, column=13, value=str(item.get('SENDER', ''))).alignment = Alignment(horizontal='left')
-        ws_det.cell(row=det_row, column=14, value=str(item.get('RECEIVER', ''))).alignment = Alignment(horizontal='left')
-        ws_det.cell(row=det_row, column=15, value=str(item.get('Phone', item.get('PHONE', '')))).alignment = Alignment(horizontal='center')
-        ws_det.cell(row=det_row, column=16, value=str(item.get('DELIVERY POST OFFICE', ''))).alignment = Alignment(horizontal='center')
+        # REMOVED: Grace_Note column (column 12) - No longer needed
+        ws_det.cell(row=det_row, column=12, value=str(item.get('SENDER', ''))).alignment = Alignment(horizontal='left')
+        ws_det.cell(row=det_row, column=13, value=str(item.get('RECEIVER', ''))).alignment = Alignment(horizontal='left')
+        ws_det.cell(row=det_row, column=14, value=str(item.get('Phone', item.get('PHONE', '')))).alignment = Alignment(horizontal='center')
+        ws_det.cell(row=det_row, column=15, value=str(item.get('DELIVERY POST OFFICE', ''))).alignment = Alignment(horizontal='center')
 
         data_font = Font(name="Arial", size=10, color="000000")
         for col_i in range(1, len(detail_cols) + 1):
