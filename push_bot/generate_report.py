@@ -189,8 +189,9 @@ TRANSIT_ACTION_MAP = {
 
 # Branch (Not Assign) — parcels received at branch but not yet assigned to rider
 NOT_ASSIGN_ACTION_MAP = {
-    '306': ('ដឹកជញ្ជូន', 'ចាត់អ្នកដឹក'),
     '309': ('ដឹកជញ្ជូន', 'ចាត់អ្នកដឹក'),
+    '310': ('ដឹកជញ្ជូន', 'ចាត់អ្នកដឹក'),
+    '306': ('ដឹកជញ្ជូន', 'ចាត់អ្នកដឹក'),
     '400': ('ដឹកជញ្ជូន', 'ចាត់អ្នកដឹក'),
 }
 BRANCH_ACTION_MAP = NOT_ASSIGN_ACTION_MAP  # backward compat alias
@@ -380,7 +381,11 @@ def map_to_post_office(current_office, zone_mapping):
     if len(current_office) >= 3:
         prefix = current_office[:3]
         
-        # Look for matching post office with that prefix
+        # NEVER blindly map Phnom Penh agencies to PNPP001! (PNP has 14 separate hubs)
+        if prefix == 'PNP':
+            return current_office
+
+        # Look for matching post office with that prefix (for single-hub provinces like CHA, PRE, BAT, etc.)
         for po in zone_mapping.get('by_post_office', {}).keys():
             if po.startswith(prefix):
                 return po

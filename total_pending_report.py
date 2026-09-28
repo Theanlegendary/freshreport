@@ -60,7 +60,7 @@ EXCLUDED_STATUSES = {
     '230',  # In transit to Mega
     '300',  # Dispatched / Transit
     '302',  # Completed loading to Hub
-    '310',  # Bagged / Packed to Hub (Đóng kiện)
+    '306',  # Dispatched from Mega (Send Mega / Transit)
     '311',  # Handover to Mega (Nhận tay)
     # Pickup chain — uncollected orders
     '110',  # New order / Pickup pending

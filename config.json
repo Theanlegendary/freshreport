@@ -129,7 +129,7 @@
       ]
     },
     "image_mode": "long",
-    "paused": false
+    "paused": true
   },
   "api": {
     "url": "https://gw-express.metfone.com.kh/tms-report/api/v1/reports/stages/export-detail",
@@ -574,8 +574,10 @@
       "title": "DELIVERY BILL CHECK",
       "is_label": "Delivery",
       "status_codes": [
+        "400",
         "401",
         "402",
+        "420",
         "430",
         "460",
         "470",
@@ -597,7 +599,7 @@
         "230",
         "300",
         "302",
-        "310",
+        "306",
         "311"
       ]
     },
@@ -606,9 +608,8 @@
       "title": "PENDING BILL CHECK",
       "is_label": "Branch",
       "status_codes": [
-        "306",
         "309",
-        "400"
+        "310"
       ]
     }
   ],
